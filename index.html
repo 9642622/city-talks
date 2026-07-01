@@ -66,12 +66,6 @@
       </select>
     </div>
     <div class="row">
-      <select id="length">
-        <option value="30–45 секунд, коротко">Коротко</option>
-        <option value="2–3 минуты" selected>Обычно</option>
-        <option value="6–8 минут, глубоко">Глубоко</option>
-        <option value="10–12 минут, подробная экскурсия">Экскурсия</option>
-      </select>
       <select id="style">
         <option value="живая драматическая история, как у хорошего гида" selected>Живая история</option>
         <option value="про архитектуру: что смотреть глазами на фасаде">Архитектура</option>
@@ -181,7 +175,7 @@ function render(titles, status) {
     const el = document.createElement('div');
     el.className = 'card place';
     el.innerHTML = `<b>${t}</b>`;
-    el.onclick = () => tell(t);
+    el.onclick = () => askLength(t);
     $('#places').appendChild(el);
   }
 }
@@ -266,7 +260,7 @@ async function recognizeByPhoto(file) {
     for (const n of names.slice(0, 3)) { const t = (await wikiFirstTitle(n)) || n; if (!titles.includes(t)) titles.push(t); }
     log('📷 → кандидаты: ' + JSON.stringify(titles));
     if (titles.length === 1) {
-      tell(titles[0]);                       // уверенно — сразу рассказ
+      askLength(titles[0]);                  // уверенно — спросим длину и рассказ
     } else {
       stopSpeak(); stopBg();                 // неуверенно — даём выбрать
       $('#player').classList.add('hidden');
@@ -311,113 +305,121 @@ async function getFacts(title) {
   return combined;
 }
 
-async function tell(title) {
-  stopSpeak();
+// общие правила рассказа (достоверность, ударения, числа) — для зачина и продолжения
+const STORY_RULES = `Правила:
+- Опирайся ТОЛЬКО на факты ниже; не выдумывай дат, имён, событий, которых в них нет.
+- Разные версии — озвучь обе («по одним данным… по другим…»). Легенду называй легендой, но рассказывай.
+- Живо и конкретно: годы, имена, события, детали. Без общих слов вроде «древнее здание с богатой историей».
+- Обращайся на «ты». Без markdown — только сплошной текст для озвучки.
+- В омографах (стре́лки/стрелки́, за́мок/замо́к, о́рган/орга́н) ставь знак ударения (U+0301) сразу после ударной гласной; обычные слова не помечай.
+- ВСЕ числа — прописью словами, без цифр и римских цифр. Годы одним полным числительным: «1812» → «тысяча восемьсот двенадцатый» (НЕ «восемнадцать двенадцать»). Проверь: цифр в тексте не осталось.`;
+
+// один запрос к Claude → чистый текст (или бросает исключение)
+async function claudeText(prompt, maxTokens) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key.value.trim(),
+               'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.content.map(c => c.text).join('').replace(/\s*[—–]\s*/g, ', ').trim();
+}
+
+// очередь озвучки: в неё дозагружают текст (зачин, потом продолжение), она озвучивает на лету с предзагрузкой
+function makeNarration() {
+  const token = playToken;
+  const q = [];
+  let ended = false, wake = null;
+  const notify = () => { if (wake) { const w = wake; wake = null; w(); } };
+  const push = text => { for (const c of splitChunks(forTTS(text), 3500)) q.push(c); notify(); };
+  const finish = () => { ended = true; notify(); };
+  (async () => {
+    const synth = c => ttsSynth(c).catch(e => ({ err: e }));
+    let curP = null, curChunk = null;
+    while (playToken === token) {
+      if (!curP) {
+        if (!q.length) { if (ended) break; await new Promise(r => (wake = r)); continue; }
+        curChunk = q.shift(); curP = synth(curChunk);
+      }
+      const url = await curP; curP = null;
+      if (playToken !== token) return;
+      let follow = null;
+      if (q.length) { const c2 = q.shift(); follow = { c: c2, p: synth(c2) }; }   // предзагрузка следующего
+      if (url && url.err) { $('#voiceStatus').textContent = `⚠️ Голос: ${url.err.message} — робот.`; await browserSpeak(curChunk); }
+      else { $('#voiceStatus').textContent = '🔊 Голос OpenAI'; await playUrl(url); }
+      if (playToken !== token) return;
+      if (follow) { curChunk = follow.c; curP = follow.p; }
+    }
+  })();
+  return { push, finish };
+}
+
+// шаг 1: выбор длины после тапа по месту
+function askLength(title) {
   if (!key.value) { alert('Сначала впиши ключ Anthropic в настройках ⚙️'); $('#setup').open = true; return; }
-  const myToken = ++playToken;   // этот запрос; Стоп/новый тап его аннулируют
-  log('▶ tell:', '"' + title + '"', '| источник=' + wiki());
-  startBg();   // фоновая музыка под весь рассказ
+  ++playToken; stopSpeak(); stopBg();
   $('#player').classList.remove('hidden');
   $('#title').textContent = title;
-  $('#story').textContent = 'Собираю факты и пишу рассказ…';
+  $('#voiceStatus').textContent = '';
+  const box = $('#story'); box.textContent = '';
+  const q = document.createElement('div'); q.style.marginBottom = '8px';
+  q.textContent = `Насколько подробно рассказать про «${title}»?`;
+  const row = document.createElement('div'); row.className = 'row';
+  [['short', '🐇 Коротко'], ['medium', '🚶 Средне'], ['long', '📖 Подробно']].forEach(([val, label]) => {
+    const b = document.createElement('button'); b.className = 'sec'; b.textContent = label;
+    b.onclick = () => tellProgressive(title, val);
+    row.appendChild(b);
+  });
+  box.appendChild(q); box.appendChild(row);
   $('#player').scrollIntoView({ behavior: 'smooth' });
+}
 
-  // мгновенное интро — звучит, пока в фоне качаются факты и пишется рассказ
-  const intros = [
-    `Отлично! Хочешь историю про ${title}? Сейчас посмотрим, что у нас есть…`,
-    `${title}… хороший выбор. Дай-ка соберу, что про это известно…`,
-    `О, ${title}! Минутку — загляну, что тут за история…`
-  ];
-  const introDone = speak(intros[Math.floor(Math.random() * intros.length)]);
+// шаг 2: зачин (одинаковый для всех длин) звучит сразу; продолжение догружается в фоне
+async function tellProgressive(title, length) {
+  const myToken = ++playToken;
+  stopSpeak(); startBg();
+  $('#title').textContent = title;
+  $('#voiceStatus').textContent = '';
+  $('#story').textContent = 'Собираю факты…';
+  log('▶ рассказ:', '"' + title + '"', '| длина=' + length + ' | источник=' + wiki());
 
-  // плеер ожидания: интро → каждые ~10с короткая «заглушка», пока рассказ не готов → сам рассказ
-  let storyText = null, failed = false;
-  log('интро запущено');
-  (async () => {
-    await introDone;
-    log('интро отзвучало → пауза (рассказ готов? ' + (storyText !== null) + ')');
-    // пауза после интро — воздух, чтобы заглушки не вылетали впритык (музыка играет)
-    for (let t = 0; t < 5 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
-    const fillers = ['Сейчас начнём…', 'Ещё буквально секунду…', 'Почти закончил…',
-                     'Уже совсем близко к финалу…', 'Так, ещё чуть-чуть…', 'Ещё мгновение, и поедем…'];
-    let i = 0;
-    while (storyText === null && !failed && playToken === myToken) {
-      const ph = fillers[i++ % fillers.length];
-      log('🗣 заглушка: ' + ph);
-      await speak(ph);
-      for (let t = 0; t < 7 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
-    }
-    log('плеер завершил ожидание (готов=' + (storyText !== null) + ', failed=' + failed + ')');
-    if (storyText && playToken === myToken) { log('▶ включаю рассказ'); speakLong(storyText); }
-  })();
-
-  // факты из Wikipedia (бесплатно, без ключа)
   let facts = await getFacts(title);
-  if (!facts || facts.length < 150) {
-    $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.';
-    failed = true; log('✖ нет фактов для "' + title + '", стоп');
-    return;
-  }
-  facts = facts.slice(0, 12000); // ponytail: режем под лимит токенов/цены (вмещаем несколько источников)
+  if (playToken !== myToken) return;
+  if (!facts || facts.length < 150) { $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.'; log('✖ нет фактов'); stopBg(); return; }
+  facts = facts.slice(0, 12000);
 
-  const prompt =
-`Ты — живой городской рассказчик для туриста, который стоит прямо перед объектом «${title}».
-Расскажи историю на ${$('#storyLang').value} языке. Стиль: ${$('#style').value}. Длина: ${$('#length').value}.
+  const base = `Ты — живой городской рассказчик для туриста у объекта «${title}». Язык: ${$('#storyLang').value}. Стиль: ${$('#style').value}.\n${STORY_RULES}\n\nФАКТЫ ОБ ОБЪЕКТЕ (из нескольких Wikipedia на разных языках, помечены [Wikipedia XX] — объедини самое интересное, не повторяйся):\n${facts}`;
 
-ГЛАВНОЕ ТРЕБОВАНИЕ: рассказ должен быть НАСЫЩЕН конкретикой из фактов ниже —
-конкретные годы, имена людей, события, числа, кто построил, что здесь происходило.
-Никаких общих слов вроде «древнее здание с богатой историей». Бери из текста реальные
-детали и вплетай их в живой рассказ. Если в фактах есть дата — назови её. Есть имя — назови.
-
-Правила честности:
-- Не выдумывай того, чего в фактах НЕТ (не сочиняй даты, имена, события от себя).
-- Если источник даёт разные версии — озвучь обе («по одним данным… по другим…»).
-- Легенду честно называй легендой («по одной из легенд…»), но расскажи её — это оживляет.
-- Обращайся на «ты». КАЖДЫЙ рассказ начинай ПО-РАЗНОМУ — не повторяй один и тот же зачин.
-  Чередуй разные крючки: неожиданный факт, вопрос, живую сцену из прошлого, дату с событием, человека.
-  НЕ начинай со слов «посмотри перед собой», «посмотри на…», «перед тобой…».
-- Без markdown, только сплошной текст для озвучки.
-- ВАЖНО для озвучки: в словах с неоднозначным ударением (омографы — стре́лки/стрелки́, за́мок/замо́к,
-  о́рган/орга́н, па́рить/пари́ть, у́же/уже́ и т.п.) ставь знак ударения (комбинирующая острая, U+0301)
-  сразу ПОСЛЕ ударной гласной, чтобы синтезатор произнёс верно по контексту. Обычные однозначные слова НЕ помечай.
-- ВСЕ числа пиши ПРОПИСЬЮ словами, никаких цифр и римских цифр. Синтезатор плохо читает цифры.
-  Примеры: «XIII век» → «тринадцатый век»; «на 40 минут» → «на сорок минут»; «5 башен» → «пять башен».
-- ГОДЫ пиши ПОЛНЫМ числом, а не парами разрядов:
-  «1812 год» → «тысяча восемьсот двенадцатый год» (в тексте падеж по смыслу: «летом тысяча восемьсот двенадцатого года»).
-  НЕЛЬЗЯ разбивать на пары: НЕ «восемнадцать двенадцать», НЕ «восемнадцать двенадцатого».
-  Ещё: «1334» → «тысяча триста тридцать четвёртый»; «1201» → «тысяча двести первый»; «2000» → «двухтысячный».
-  Проверь весь текст: цифр не осталось, и каждый год записан одним полным числительным.
-
-ФАКТЫ ОБ ОБЪЕКТЕ (собраны из нескольких источников — Wikipedia на разных языках, помечены [Wikipedia XX];
-разные языки дают разные детали и байки — объедини самое интересное и достоверное, не повторяйся):
-${facts}`;
-
+  // ЗАЧИН — короткий, генерится быстро, начинает звучать сразу; одинаков для любой длины
+  $('#story').textContent = 'Пишу начало…';
+  let opening;
   try {
-    log('claude запрос… факты=' + facts.length + ' символов');
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key.value.trim(),
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',   // грамотнее по-русски (числа/падежи/ударения); задержку прикрывают заглушки. Быстрее — 'claude-haiku-4-5-20251001'
-        max_tokens: 4000,             // до ~10–12 мин рассказа; озвучка нарезается на куски
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-    const data = await res.json();
-    log('claude ответ:', res.status);
-    if (data.error) { $('#story').textContent = 'Ошибка API: ' + data.error.message; failed = true; log('✖ claude error:', data.error.message); return; }
-    const text = data.content.map(c => c.text).join('').replace(/\s*[—–]\s*/g, ', ');
-    $('#story').textContent = text;
-    storyText = text;   // плеер сам включит рассказ после текущей «заглушки»
-    log('✓ рассказ готов, символов:', text.length);
+    opening = await claudeText(base + `\n\nЗАДАНИЕ: напиши ЗАЧИН рассказа — сильное живое начало на 3–4 предложения (около 30–40 секунд звучания). Это только вступление, впереди продолжение: не подводи итоги и не прощайся.`, 700);
+  } catch (e) { if (playToken !== myToken) return; $('#story').textContent = 'Ошибка: ' + e.message; log('✖ зачин:', e.message); stopBg(); return; }
+  if (playToken !== myToken) return;
+  log('✓ зачин готов, символов:', opening.length);
+
+  const narration = makeNarration();
+  narration.push(opening);          // ← зачин пошёл в озвучку немедленно
+  $('#story').textContent = opening;
+
+  if (length === 'short') { narration.finish(); return; }
+
+  // ПРОДОЛЖЕНИЕ — пишется, пока звучит зачин, и дозагружается в ту же очередь
+  const more = length === 'medium' ? 'ещё примерно на 2–3 минуты' : 'ещё примерно на 8–10 минут';
+  try {
+    const cont = await claudeText(base + `\n\nВот НАЧАЛО рассказа, которое уже звучит:\n«${opening}»\n\nЗАДАНИЕ: ПРОДОЛЖИ рассказ ${more}, НЕ повторяя и НЕ пересказывая начало. Плавно подхвати и углубись: детали, истории, люди, эпизоды, атмосфера. Заверши коротким выразительным финалом.`, 4000);
+    if (playToken !== myToken) return;
+    log('✓ продолжение готово, символов:', cont.length);
+    narration.push(cont);
+    $('#story').textContent = opening + '\n\n' + cont;
   } catch (e) {
-    $('#story').textContent = 'Сбой запроса: ' + e.message;
-    failed = true; log('✖ claude fetch fail:', e.message);
+    if (playToken !== myToken) return;
+    log('✖ продолжение:', e.message);   // зачин уже прозвучал — не критично
+  } finally {
+    narration.finish();
   }
 }
 
