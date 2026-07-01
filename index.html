@@ -368,18 +368,22 @@ async function claudeStream(prompt, maxTokens, onDelta) {
 // стримим генерацию прямо в очередь озвучки: готовые предложения (кусками ≥300 знаков) уходят в TTS сразу
 async function streamToNarration(prompt, maxTokens, narration, onText, prefix = '') {
   let pending = '', shown = '';
+  const flush = () => {
+    // режем по концу предложения, идущему после ~60 знаков: короткие фразы группируются, кусок уходит быстро
+    for (;;) {
+      const re = /[.!?…]["»)]?(\s|$)/g;
+      let cut = -1, m;
+      while ((m = re.exec(pending))) { if (m.index >= 60) { cut = m.index + m[0].length; break; } }
+      if (cut < 0) break;
+      narration.push(pending.slice(0, cut));       // ← кусок уходит в синтез немедленно
+      shown += pending.slice(0, cut);
+      pending = pending.slice(cut);
+    }
+  };
   const full = await claudeStream(prompt, maxTokens, delta => {
     pending += delta;
-    if (pending.length >= 300) {
-      const idx = Math.max(pending.lastIndexOf('. '), pending.lastIndexOf('! '), pending.lastIndexOf('? '), pending.lastIndexOf('… '), pending.lastIndexOf('\n\n'));
-      if (idx > 100) {
-        const piece = pending.slice(0, idx + 1);
-        pending = pending.slice(idx + 1);
-        narration.push(piece);                 // ← в озвучку немедленно
-        shown += piece;
-        if (onText) onText(prefix + shown + pending);
-      } else if (onText) onText(prefix + shown + pending);
-    } else if (onText) onText(prefix + shown + pending);
+    flush();
+    if (onText) onText(prefix + shown + pending);
   });
   if (pending.trim()) narration.push(pending);   // хвост
   return full;
@@ -388,27 +392,23 @@ async function streamToNarration(prompt, maxTokens, narration, onText, prefix = 
 // очередь озвучки: в неё дозагружают текст (зачин, потом продолжение), она озвучивает на лету с предзагрузкой
 function makeNarration() {
   const token = playToken;
-  const q = [];
-  let ended = false, wake = null;
+  const jobs = [];            // упорядоченный список { text, p }: синтез каждого куска СТАРТУЕТ сразу при push, параллельно
+  let ended = false, wake = null, i = 0;
   const notify = () => { if (wake) { const w = wake; wake = null; w(); } };
-  const push = text => { for (const c of splitChunks(forTTS(text), 3500)) q.push(c); notify(); };
+  const push = text => {
+    for (const c of splitChunks(forTTS(text), 800)) jobs.push({ text: c, p: ttsSynth(c).catch(e => ({ err: e })) });
+    notify();
+  };
   const finish = () => { ended = true; notify(); };
   (async () => {
-    const synth = c => ttsSynth(c).catch(e => ({ err: e }));
-    let curP = null, curChunk = null;
     while (playToken === token) {
-      if (!curP) {
-        if (!q.length) { if (ended) break; await new Promise(r => (wake = r)); continue; }
-        curChunk = q.shift(); curP = synth(curChunk);
-      }
-      const url = await curP; curP = null;
+      if (i >= jobs.length) { if (ended) break; await new Promise(r => (wake = r)); continue; }
+      const job = jobs[i++];
+      const url = await job.p;                    // почти всегда уже готово — синтез шёл параллельно, пока играли предыдущие
       if (playToken !== token) return;
-      let follow = null;
-      if (q.length) { const c2 = q.shift(); follow = { c: c2, p: synth(c2) }; }   // предзагрузка следующего
-      if (url && url.err) { $('#voiceStatus').textContent = `⚠️ Голос: ${url.err.message} — робот.`; await browserSpeak(curChunk); }
+      if (url && url.err) { $('#voiceStatus').textContent = `⚠️ Голос: ${url.err.message} — робот.`; await browserSpeak(job.text); }
       else { $('#voiceStatus').textContent = '🔊 Голос OpenAI'; await playUrl(url); }
       if (playToken !== token) return;
-      if (follow) { curChunk = follow.c; curP = follow.p; }
     }
   })();
   return { push, finish };
