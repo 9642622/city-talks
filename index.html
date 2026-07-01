@@ -108,8 +108,21 @@
   <audio id="bg" loop src="fon.mp3"></audio>
 </div>
 
+<details id="logPanel" style="margin-top:12px">
+  <summary class="muted">🪵 Логи (для отладки)</summary>
+  <div class="row" style="margin:6px 0">
+    <button id="logCopy" class="sec">📋 Скопировать</button>
+    <button id="logClear" class="sec">🧹 Очистить</button>
+  </div>
+  <pre id="logBox" style="white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto;background:#0b0d11;border:1px solid #2a2e36;border-radius:8px;padding:8px;color:#a8b0bd;margin:0"></pre>
+</details>
+
 <script>
 const $ = s => document.querySelector(s);
+function log(...a){ const t=new Date().toLocaleTimeString(); const line='['+t+'] '+a.map(x=>typeof x==='object'?JSON.stringify(x):String(x)).join(' '); const box=$('#logBox'); if(box){ box.textContent+=line+'\n'; box.scrollTop=box.scrollHeight; } console.log('[log]',...a); }
+window.addEventListener('error', e=>log('JS ERROR:', e.message, (e.filename||'')+':'+(e.lineno||'')));
+window.addEventListener('unhandledrejection', e=>log('PROMISE REJECT:', (e.reason&&e.reason.message)?e.reason.message:e.reason));
+addEventListener('DOMContentLoaded',()=>{ $('#logCopy').onclick=()=>{ navigator.clipboard&&navigator.clipboard.writeText($('#logBox').textContent); log('(лог скопирован)'); }; $('#logClear').onclick=()=>{ $('#logBox').textContent=''; }; });
 const key = $('#key');
 // привязываем поля к localStorage
 const persist = (el, k) => { const v = localStorage.getItem(k); if (v !== null) el.value = v; el.addEventListener('change', () => localStorage.setItem(k, el.value.trim())); };
@@ -233,11 +246,13 @@ async function recognizeByPhoto(file) {
     const data = await res.json();
     if (data.error) { $('#story').textContent = 'Ошибка распознавания: ' + data.error.message; stopBg(); return; }
     const name = data.content.map(c => c.text).join('').trim();
+    log('📷 распознано: "' + name + '"');
     if (!name || /^нет\b/i.test(name)) {
       $('#story').textContent = 'Не удалось уверенно опознать достопримечательность на фото. Попробуй другой снимок или выбери место вручную.';
-      stopBg(); return;
+      stopBg(); log('✖ фото не опознано'); return;
     }
     const title = await wikiFirstTitle(name) || name;
+    log('📷 → статья: "' + title + '"');
     tell(title);   // дальше — обычный конвейер: факты → рассказ → голос
   } catch (e) {
     $('#story').textContent = 'Сбой распознавания: ' + e.message;
@@ -245,10 +260,28 @@ async function recognizeByPhoto(file) {
   }
 }
 
+async function getFacts(title) {
+  const one = async (L, t) => {
+    const ex = await fetch(`https://${L}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exsectionformat=plain&redirects=1&titles=${encodeURIComponent(t)}&format=json&origin=*`).then(r => r.json());
+    const p = Object.values(ex.query?.pages || {})[0] || {};
+    return { text: p.extract || '', missing: !!p.missing };
+  };
+  const L0 = wiki();
+  const r = await one(L0, title);
+  log('extract', L0, '"' + title + '"', 'len=' + r.text.length, r.missing ? '(статьи нет)' : '');
+  if (r.text.length > 150) return r.text;
+  // фолбэк: английская Wikipedia через поиск (у неё самый широкий охват)
+  const s = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(title)}&srlimit=1&format=json&origin=*`).then(x => x.json());
+  const en = s.query?.search?.[0]?.title;
+  if (en) { const r2 = await one('en', en); log('extract fallback en', '"' + en + '"', 'len=' + r2.text.length); if (r2.text.length > 150) return r2.text; }
+  return r.text;
+}
+
 async function tell(title) {
   stopSpeak();
   if (!key.value) { alert('Сначала впиши ключ Anthropic в настройках ⚙️'); $('#setup').open = true; return; }
   const myToken = ++playToken;   // этот запрос; Стоп/новый тап его аннулируют
+  log('▶ tell:', '"' + title + '"', '| источник=' + wiki());
   startBg();   // фоновая музыка под весь рассказ
   $('#player').classList.remove('hidden');
   $('#title').textContent = title;
@@ -280,12 +313,12 @@ async function tell(title) {
   })();
 
   // факты из Wikipedia (бесплатно, без ключа)
-  const lang = $('#wikiLang').value;
-  const ex = await fetch(`https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts` +
-    `&explaintext=1&exsectionformat=plain&redirects=1&titles=${encodeURIComponent(title)}&format=json&origin=*`)
-    .then(r => r.json());
-  let facts = Object.values(ex.query?.pages || {})[0]?.extract || '';
-  if (!facts) { $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.'; failed = true; return; }
+  let facts = await getFacts(title);
+  if (!facts || facts.length < 150) {
+    $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.';
+    failed = true; log('✖ нет фактов для "' + title + '", стоп');
+    return;
+  }
   facts = facts.slice(0, 8000); // ponytail: режем длинные статьи под лимит токенов/цены
 
   const prompt =
@@ -320,6 +353,7 @@ async function tell(title) {
 ${facts}`;
 
   try {
+    log('claude запрос… факты=' + facts.length + ' символов');
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -335,13 +369,15 @@ ${facts}`;
       })
     });
     const data = await res.json();
-    if (data.error) { $('#story').textContent = 'Ошибка API: ' + data.error.message; failed = true; return; }
+    log('claude ответ:', res.status);
+    if (data.error) { $('#story').textContent = 'Ошибка API: ' + data.error.message; failed = true; log('✖ claude error:', data.error.message); return; }
     const text = data.content.map(c => c.text).join('').replace(/\s*[—–]\s*/g, ', ');
     $('#story').textContent = text;
     storyText = text;   // плеер сам включит рассказ после текущей «заглушки»
+    log('✓ рассказ готов, символов:', text.length);
   } catch (e) {
     $('#story').textContent = 'Сбой запроса: ' + e.message;
-    failed = true;
+    failed = true; log('✖ claude fetch fail:', e.message);
   }
 }
 
@@ -408,15 +444,18 @@ async function speak(text) {
       if (!res.ok) {
         const body = await res.text();
         $('#voiceStatus').textContent = `⚠️ OpenAI TTS ошибка ${res.status}: ${body.slice(0,300)} — включён робот.`;
+        log('✖ TTS OpenAI', res.status, body.slice(0,120));
         return browserSpeak(text);
       }
       $('#voiceStatus').textContent = '🔊 Голос OpenAI (gpt-4o-mini-tts)';
+      log('TTS ok: "' + text.slice(0, 40) + '…"');
       audio = new Audio(URL.createObjectURL(await res.blob()));
       const done = new Promise(r => { speakResolve = r; audio.onended = settleSpeak; audio.onerror = settleSpeak; });
       audio.play();
       return done;
     } catch (e) {
       $('#voiceStatus').textContent = `⚠️ Голос не загрузился: ${e.message} (возможно CORS/сеть) — включён робот.`;
+      log('✖ TTS fetch fail:', e.message);
       return browserSpeak(text);
     }
   }
