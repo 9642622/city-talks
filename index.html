@@ -206,10 +206,18 @@ function loadImageResized(file, maxDim = 1024) {
 // имя места → каноничный заголовок статьи Wikipedia (фаззи + контекст города)
 async function wikiFirstTitle(q) {
   const city = $('#city').value.trim();
-  const fuzzy = q.split(/\s+/).map(w => w + '~').join(' ') + (city ? ' ' + city : '');
-  const r = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=search` +
-    `&srsearch=${encodeURIComponent(fuzzy)}&srlimit=1&format=json&origin=*`).then(r => r.json());
-  return r.query?.search?.[0]?.title || null;
+  // убираем скобки/пунктуацию (в них бывает мусор вроде «(Рига, площадь Ливов)»), слова-название оставляем
+  const core = q.replace(/\([^)]*\)/g, ' ').replace(/[.,;:!?«»"'()\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  const search = async srsearch => {
+    const r = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=search` +
+      `&srsearch=${encodeURIComponent(srsearch)}&srlimit=1&format=json&origin=*`).then(r => r.json());
+    return r.query?.search?.[0]?.title || null;
+  };
+  // 1) обычный поиск + город — лучшая релевантность (Claude пишет название верно)
+  let t = await search(core + (city ? ' ' + city : ''));
+  if (t) return t;
+  // 2) фолбэк с фаззи — на случай опечаток
+  return await search(core.split(/\s+/).filter(Boolean).map(w => w + '~').join(' ') + (city ? ' ' + city : ''));
 }
 
 async function recognizeByPhoto(file) {
@@ -284,8 +292,21 @@ async function getFacts(title) {
 
   // 1) основная статья на выбранном языке + межъязыковые ссылки на тот же объект
   const main = await api(`${L}.wikipedia.org`, `action=query&prop=extracts|langlinks&explaintext=1&exsectionformat=plain&lllimit=500&redirects=1&titles=${encodeURIComponent(title)}`);
-  const m = extractOf(main.query?.pages);
+  let m = extractOf(main.query?.pages);
   log('Wikipedia ' + L, '"' + title + '"', 'len=' + m.text.length, m.missing ? '(нет статьи)' : '');
+  // подстраховка: если по точному заголовку пусто — ищем настоящую статью в том же языке
+  if (m.text.length <= 150) {
+    const city = $('#city').value.trim();
+    const cq = title.replace(/\([^)]*\)/g, ' ').replace(/[.,;:!?«»"'()\[\]]/g, ' ').replace(/\s+/g, ' ').trim() + (city ? ' ' + city : '');
+    const s = await api(`${L}.wikipedia.org`, `action=query&list=search&srsearch=${encodeURIComponent(cq)}&srlimit=1`);
+    const alt = s.query?.search?.[0]?.title;
+    if (alt && alt !== title) {
+      const main2 = await api(`${L}.wikipedia.org`, `action=query&prop=extracts|langlinks&explaintext=1&exsectionformat=plain&lllimit=500&redirects=1&titles=${encodeURIComponent(alt)}`);
+      const m2 = extractOf(main2.query?.pages);
+      log('↳ уточнил статью:', '"' + alt + '"', 'len=' + m2.text.length);
+      if (m2.text.length > 150) m = m2;
+    }
+  }
   if (m.text.length > 150) parts.push(`[Wikipedia ${L.toUpperCase()}]\n` + m.text.slice(0, 6000));
 
   // 2) тот же объект на других языках — через langlinks (точное совпадение сущности)
