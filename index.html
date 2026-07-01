@@ -260,21 +260,36 @@ async function recognizeByPhoto(file) {
   }
 }
 
+// собираем факты об ОДНОМ объекте из нескольких языковых Wikipedia (разные детали и байки)
 async function getFacts(title) {
-  const one = async (L, t) => {
-    const ex = await fetch(`https://${L}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exsectionformat=plain&redirects=1&titles=${encodeURIComponent(t)}&format=json&origin=*`).then(r => r.json());
-    const p = Object.values(ex.query?.pages || {})[0] || {};
-    return { text: p.extract || '', missing: !!p.missing };
-  };
-  const L0 = wiki();
-  const r = await one(L0, title);
-  log('extract', L0, '"' + title + '"', 'len=' + r.text.length, r.missing ? '(статьи нет)' : '');
-  if (r.text.length > 150) return r.text;
-  // фолбэк: английская Wikipedia через поиск (у неё самый широкий охват)
-  const s = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(title)}&srlimit=1&format=json&origin=*`).then(x => x.json());
-  const en = s.query?.search?.[0]?.title;
-  if (en) { const r2 = await one('en', en); log('extract fallback en', '"' + en + '"', 'len=' + r2.text.length); if (r2.text.length > 150) return r2.text; }
-  return r.text;
+  const api = (host, params) => fetch(`https://${host}/w/api.php?${params}&format=json&origin=*`).then(r => r.json());
+  const extractOf = pages => { const p = Object.values(pages || {})[0] || {}; return { text: p.extract || '', langlinks: p.langlinks || [], missing: !!p.missing }; };
+  const wpExtract = (host, t) => api(host, `action=query&prop=extracts&explaintext=1&exsectionformat=plain&redirects=1&titles=${encodeURIComponent(t)}`).then(d => extractOf(d.query?.pages).text);
+
+  const L = wiki();
+  const parts = [];
+
+  // 1) основная статья на выбранном языке + межъязыковые ссылки на тот же объект
+  const main = await api(`${L}.wikipedia.org`, `action=query&prop=extracts|langlinks&explaintext=1&exsectionformat=plain&lllimit=500&redirects=1&titles=${encodeURIComponent(title)}`);
+  const m = extractOf(main.query?.pages);
+  log('Wikipedia ' + L, '"' + title + '"', 'len=' + m.text.length, m.missing ? '(нет статьи)' : '');
+  if (m.text.length > 150) parts.push(`[Wikipedia ${L.toUpperCase()}]\n` + m.text.slice(0, 6000));
+
+  // 2) тот же объект на других языках — через langlinks (точное совпадение сущности)
+  const other = [];
+  const pick = code => (m.langlinks.find(l => l.lang === code) || {})['*'];
+  if (L !== 'en') { let en = pick('en'); if (!en) { const s = await api('en.wikipedia.org', `action=query&list=search&srsearch=${encodeURIComponent(title)}&srlimit=1`); en = s.query?.search?.[0]?.title; } if (en) other.push(['en', en]); }
+  for (const c of ['de', 'fr', 'lv']) { const t = pick(c); if (t) other.push([c, t]); }
+
+  for (const [code, t] of other.slice(0, 3)) {
+    const e = await wpExtract(`${code}.wikipedia.org`, t);
+    log('Wikipedia ' + code, '"' + t + '"', 'len=' + e.length);
+    if (e.length > 150) parts.push(`[Wikipedia ${code.toUpperCase()}]\n` + e.slice(0, 3500));
+  }
+
+  const combined = parts.join('\n\n---\n\n');
+  log('источников собрано:', parts.length, '| всего символов:', combined.length);
+  return combined;
 }
 
 async function tell(title) {
@@ -324,7 +339,7 @@ async function tell(title) {
     failed = true; log('✖ нет фактов для "' + title + '", стоп');
     return;
   }
-  facts = facts.slice(0, 8000); // ponytail: режем длинные статьи под лимит токенов/цены
+  facts = facts.slice(0, 12000); // ponytail: режем под лимит токенов/цены (вмещаем несколько источников)
 
   const prompt =
 `Ты — живой городской рассказчик для туриста, который стоит прямо перед объектом «${title}».
@@ -354,7 +369,8 @@ async function tell(title) {
   Ещё: «1334» → «тысяча триста тридцать четвёртый»; «1201» → «тысяча двести первый»; «2000» → «двухтысячный».
   Проверь весь текст: цифр не осталось, и каждый год записан одним полным числительным.
 
-ФАКТЫ ОБ ОБЪЕКТЕ:
+ФАКТЫ ОБ ОБЪЕКТЕ (собраны из нескольких источников — Wikipedia на разных языках, помечены [Wikipedia XX];
+разные языки дают разные детали и байки — объедини самое интересное и достоверное, не повторяйся):
 ${facts}`;
 
   try {
