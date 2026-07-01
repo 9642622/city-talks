@@ -335,17 +335,54 @@ const STORY_RULES = `Правила:
 - В омографах (стре́лки/стрелки́, за́мок/замо́к, о́рган/орга́н) ставь знак ударения (U+0301) сразу после ударной гласной; обычные слова не помечай.
 - ВСЕ числа — прописью словами, без цифр и римских цифр. Годы одним полным числительным: «1812» → «тысяча восемьсот двенадцатый» (НЕ «восемнадцать двенадцать»). Проверь: цифр в тексте не осталось.`;
 
-// один запрос к Claude → чистый текст (или бросает исключение)
-async function claudeText(prompt, maxTokens) {
+// потоковый запрос к Claude: onDelta(кусок) вызывается по мере генерации; возвращает полный текст
+async function claudeStream(prompt, maxTokens, onDelta) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': key.value.trim(),
                'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] })
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: maxTokens, stream: true, messages: [{ role: 'user', content: prompt }] })
   });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  return data.content.map(c => c.text).join('').replace(/\s*[—–]\s*/g, ', ').trim();
+  if (!res.ok) { const b = await res.text(); throw new Error('Claude ' + res.status + ' ' + b.slice(0, 120)); }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', full = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      let ev; try { ev = JSON.parse(payload); } catch { continue; }
+      if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { full += ev.delta.text; onDelta(ev.delta.text); }
+      if (ev.type === 'error') throw new Error(ev.error?.message || 'stream error');
+    }
+  }
+  return full.replace(/\s*[—–]\s*/g, ', ').trim();
+}
+
+// стримим генерацию прямо в очередь озвучки: готовые предложения (кусками ≥300 знаков) уходят в TTS сразу
+async function streamToNarration(prompt, maxTokens, narration, onText, prefix = '') {
+  let pending = '', shown = '';
+  const full = await claudeStream(prompt, maxTokens, delta => {
+    pending += delta;
+    if (pending.length >= 300) {
+      const idx = Math.max(pending.lastIndexOf('. '), pending.lastIndexOf('! '), pending.lastIndexOf('? '), pending.lastIndexOf('… '), pending.lastIndexOf('\n\n'));
+      if (idx > 100) {
+        const piece = pending.slice(0, idx + 1);
+        pending = pending.slice(idx + 1);
+        narration.push(piece);                 // ← в озвучку немедленно
+        shown += piece;
+        if (onText) onText(prefix + shown + pending);
+      } else if (onText) onText(prefix + shown + pending);
+    } else if (onText) onText(prefix + shown + pending);
+  });
+  if (pending.trim()) narration.push(pending);   // хвост
+  return full;
 }
 
 // очередь озвучки: в неё дозагружают текст (зачин, потом продолжение), она озвучивает на лету с предзагрузкой
@@ -413,32 +450,31 @@ async function tellProgressive(title, length) {
 
   const base = `Ты — живой городской рассказчик для туриста у объекта «${title}». Язык: ${$('#storyLang').value}. Стиль: ${$('#style').value}.\n${STORY_RULES}\n\nФАКТЫ ОБ ОБЪЕКТЕ (из нескольких Wikipedia на разных языках, помечены [Wikipedia XX] — объедини самое интересное, не повторяйся):\n${facts}`;
 
-  // ЗАЧИН — короткий, генерится быстро, начинает звучать сразу; одинаков для любой длины
-  $('#story').textContent = 'Пишу начало…';
+  const narration = makeNarration();
+
+  // ЗАЧИН — стримим: первые предложения уходят в озвучку через пару секунд; одинаков для любой длины
+  $('#story').textContent = 'Рассказываю…';
   let opening;
   try {
-    opening = await claudeText(base + `\n\nЗАДАНИЕ: напиши ЗАЧИН рассказа — сильное живое начало на 3–4 предложения (около 30–40 секунд звучания). Это только вступление, впереди продолжение: не подводи итоги и не прощайся.`, 700);
-  } catch (e) { if (playToken !== myToken) return; $('#story').textContent = 'Ошибка: ' + e.message; log('✖ зачин:', e.message); stopBg(); return; }
+    opening = await streamToNarration(
+      base + `\n\nЗАДАНИЕ: напиши ЗАЧИН рассказа — сильное живое начало на 3–4 предложения (около 30–40 секунд звучания). Это только вступление, впереди продолжение: не подводи итоги и не прощайся.`,
+      700, narration, txt => { if (playToken === myToken) $('#story').textContent = txt; });
+  } catch (e) { if (playToken !== myToken) return; $('#story').textContent = 'Ошибка: ' + e.message; log('✖ зачин:', e.message); narration.finish(); stopBg(); return; }
   if (playToken !== myToken) return;
   log('✓ зачин готов, символов:', opening.length);
 
-  const narration = makeNarration();
-  narration.push(opening);          // ← зачин пошёл в озвучку немедленно
-  $('#story').textContent = opening;
+  if (length === 'short') { narration.finish(); $('#story').textContent = opening; return; }
 
-  if (length === 'short') { narration.finish(); return; }
-
-  // ПРОДОЛЖЕНИЕ — пишется, пока звучит зачин, и дозагружается в ту же очередь
+  // ПРОДОЛЖЕНИЕ — тоже стримим в ту же очередь, пока звучит зачин; куски озвучиваются по мере готовности
   const more = length === 'medium' ? 'ещё примерно на 2–3 минуты' : 'ещё примерно на 8–10 минут';
   try {
-    const cont = await claudeText(base + `\n\nВот НАЧАЛО рассказа, которое уже звучит:\n«${opening}»\n\nЗАДАНИЕ: ПРОДОЛЖИ рассказ ${more}, НЕ повторяя и НЕ пересказывая начало. Плавно подхвати и углубись: детали, истории, люди, эпизоды, атмосфера. Заверши коротким выразительным финалом.`, 4000);
+    const cont = await streamToNarration(
+      base + `\n\nВот НАЧАЛО рассказа, которое уже звучит:\n«${opening}»\n\nЗАДАНИЕ: ПРОДОЛЖИ рассказ ${more}, НЕ повторяя и НЕ пересказывая начало. Плавно подхвати и углубись: детали, истории, люди, эпизоды, атмосфера. Заверши коротким выразительным финалом.`,
+      4000, narration, txt => { if (playToken === myToken) $('#story').textContent = txt; }, opening + '\n\n');
     if (playToken !== myToken) return;
     log('✓ продолжение готово, символов:', cont.length);
-    narration.push(cont);
-    $('#story').textContent = opening + '\n\n' + cont;
   } catch (e) {
-    if (playToken !== myToken) return;
-    log('✖ продолжение:', e.message);   // зачин уже прозвучал — не критично
+    if (playToken === myToken) log('✖ продолжение:', e.message);   // зачин уже прозвучал — не критично
   } finally {
     narration.finish();
   }
