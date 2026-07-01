@@ -234,27 +234,44 @@ async function recognizeByPhoto(file) {
       headers: { 'content-type': 'application/json', 'x-api-key': key.value.trim(),
                  'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6', max_tokens: 60,
+        model: 'claude-sonnet-4-6', max_tokens: 150,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
-          { type: 'text', text: `Что за известное туристическое место, здание или памятник на фото?` +
-            (cityHint ? ` Вероятно, это город ${cityHint}.` : '') +
-            ` Ответь ТОЛЬКО названием на русском (можно с городом), простым текстом без форматирования — без звёздочек, кавычек и markdown. Если это не достопримечательность или непонятно — ответь ровно: НЕТ.` }
+          { type: 'text', text:
+            `На фото — туристический объект. Определи КОНКРЕТНОЕ здание, памятник или достопримечательность.` +
+            (cityHint ? ` Скорее всего это город ${cityHint}.` : '') +
+            `\nПравила:\n` +
+            `- Назови именно конкретный объект (например «Три брата», «Дом Черноголовых», «Пороховая башня»), а НЕ район/улицу/город. «Старый город», «центр Риги», «историческое здание» — так НЕЛЬЗЯ.\n` +
+            `- Учитывай вывески, таблички, номера домов, характерные детали фасада.\n` +
+            `- Если не уверен на сто процентов — дай ДО ТРЁХ наиболее вероятных вариантов, каждый С НОВОЙ СТРОКИ, самый вероятный первым.\n` +
+            `- Только названия на русском, простым текстом: без нумерации, звёздочек и кавычек.\n` +
+            `- Если узнаваемой достопримечательности на фото нет — ответь ровно: НЕТ.` }
         ]}]
       })
     });
     const data = await res.json();
     if (data.error) { $('#story').textContent = 'Ошибка распознавания: ' + data.error.message; stopBg(); return; }
-    let name = data.content.map(c => c.text).join('').trim();
-    name = name.replace(/[*_`#>~]/g, '').replace(/^["'«»\s]+|["'«»\s]+$/g, '').trim(); // убираем markdown/кавычки
-    log('📷 распознано: "' + name + '"');
-    if (!name || /^нет\b/i.test(name)) {
+    const raw = data.content.map(c => c.text).join('').trim();
+    const names = raw.split('\n')
+      .map(s => s.replace(/^[\s\-–—•*\d.)]+/, '').replace(/[*_`#>~]/g, '').replace(/^["'«»\s]+|["'«»\s]+$/g, '').trim())
+      .filter(Boolean);
+    log('📷 распознано: ' + JSON.stringify(names));
+    if (!names.length || /^нет\b/i.test(names[0])) {
       $('#story').textContent = 'Не удалось уверенно опознать достопримечательность на фото. Попробуй другой снимок или выбери место вручную.';
       stopBg(); log('✖ фото не опознано'); return;
     }
-    const title = await wikiFirstTitle(name) || name;
-    log('📷 → статья: "' + title + '"');
-    tell(title);   // дальше — обычный конвейер: факты → рассказ → голос
+    // резолвим кандидатов в статьи Wikipedia
+    const titles = [];
+    for (const n of names.slice(0, 3)) { const t = (await wikiFirstTitle(n)) || n; if (!titles.includes(t)) titles.push(t); }
+    log('📷 → кандидаты: ' + JSON.stringify(titles));
+    if (titles.length === 1) {
+      tell(titles[0]);                       // уверенно — сразу рассказ
+    } else {
+      stopSpeak(); stopBg();                 // неуверенно — даём выбрать
+      $('#player').classList.add('hidden');
+      render(titles, 'По фото — возможно, одно из этих мест. Выбери нужное:');
+      $('#places').scrollIntoView({ behavior: 'smooth' });
+    }
   } catch (e) {
     $('#story').textContent = 'Сбой распознавания: ' + e.message;
     stopBg();
