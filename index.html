@@ -70,6 +70,7 @@
         <option value="30–45 секунд, коротко">Коротко</option>
         <option value="2–3 минуты" selected>Обычно</option>
         <option value="6–8 минут, глубоко">Глубоко</option>
+        <option value="10–12 минут, подробная экскурсия">Экскурсия</option>
       </select>
       <select id="style">
         <option value="живая драматическая история, как у хорошего гида" selected>Живая история</option>
@@ -347,7 +348,7 @@ async function tell(title) {
       for (let t = 0; t < 7 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
     }
     log('плеер завершил ожидание (готов=' + (storyText !== null) + ', failed=' + failed + ')');
-    if (storyText && playToken === myToken) { log('▶ включаю рассказ'); speak(storyText); }
+    if (storyText && playToken === myToken) { log('▶ включаю рассказ'); speakLong(storyText); }
   })();
 
   // факты из Wikipedia (бесплатно, без ключа)
@@ -403,7 +404,7 @@ ${facts}`;
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',   // грамотнее по-русски (числа/падежи/ударения); задержку прикрывают заглушки. Быстрее — 'claude-haiku-4-5-20251001'
-        max_tokens: 1500,
+        max_tokens: 4000,             // до ~10–12 мин рассказа; озвучка нарезается на куски
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -459,46 +460,87 @@ function stopBg() { bg.pause(); stopPad(); }
 
 function stopSpeak() { speechSynthesis.cancel(); if (audio) { audio.pause(); audio = null; } settleSpeak(); }
 
-// speak возвращает промис, который резолвится когда озвучка закончилась
+const cleanKey = s => (s || '').replace(/[^\x21-\x7E]/g, '');       // заголовки принимают только ASCII
+const forTTS = t => t.replace(/\s*[—–]\s*/g, ', ');                // тире звучат странно → пауза-запятая
+
+// синтез одного куска через OpenAI → URL аудио (бросает исключение при ошибке)
+async function ttsSynth(text) {
+  const oaKey = cleanKey($('#openaiKey').value);
+  if (!oaKey) throw new Error('нет ключа OpenAI');
+  const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + oaKey, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini-tts',
+      voice: $('#ttsVoice').value || 'onyx',
+      input: text,
+      response_format: 'mp3',
+      instructions: $('#ttsInstructions').value.trim() || 'Читай по-русски, без иностранного акцента, тёплым неспешным голосом экскурсовода.'
+    })
+  });
+  if (!res.ok) { const b = await res.text(); log('✖ TTS', res.status, b.slice(0, 120)); throw new Error('TTS ' + res.status); }
+  return URL.createObjectURL(await res.blob());
+}
+
+// проиграть готовый URL; промис резолвится по окончании (или при Стоп через settleSpeak)
+function playUrl(url) {
+  return new Promise(resolve => {
+    audio = new Audio(url);
+    speakResolve = resolve;
+    audio.onended = settleSpeak;
+    audio.onerror = settleSpeak;
+    audio.play().catch(() => settleSpeak());
+  });
+}
+
+// короткая озвучка (интро, заглушки): один кусок, при сбое — браузерный робот
 async function speak(text) {
   stopSpeak();
-  text = text.replace(/\s*[—–]\s*/g, ', ');   // тире озвучиваются странно — заменяем на паузу-запятую
-  // заголовки принимают только ASCII — вычищаем невидимый мусор из ключа/ID
-  const clean = s => s.replace(/[^\x21-\x7E]/g, '');
-  const oaKey = clean($('#openaiKey').value);
-  if (oaKey) {
-    const voice = $('#ttsVoice').value || 'onyx';
-    try {
-      const res = await fetch('https://api.openai.com/v1/audio/speech', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + oaKey, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini-tts',
-          voice,
-          input: text,
-          response_format: 'mp3',
-          instructions: $('#ttsInstructions').value.trim() || 'Читай по-русски, без иностранного акцента, тёплым неспешным голосом экскурсовода.'
-        })
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        $('#voiceStatus').textContent = `⚠️ OpenAI TTS ошибка ${res.status}: ${body.slice(0,300)} — включён робот.`;
-        log('✖ TTS OpenAI', res.status, body.slice(0,120));
-        return browserSpeak(text);
-      }
-      $('#voiceStatus').textContent = '🔊 Голос OpenAI (gpt-4o-mini-tts)';
-      log('TTS ok: "' + text.slice(0, 40) + '…"');
-      audio = new Audio(URL.createObjectURL(await res.blob()));
-      const done = new Promise(r => { speakResolve = r; audio.onended = settleSpeak; audio.onerror = settleSpeak; });
-      audio.play();
-      return done;
-    } catch (e) {
-      $('#voiceStatus').textContent = `⚠️ Голос не загрузился: ${e.message} (возможно CORS/сеть) — включён робот.`;
-      log('✖ TTS fetch fail:', e.message);
-      return browserSpeak(text);
-    }
+  text = forTTS(text);
+  if (!cleanKey($('#openaiKey').value)) return browserSpeak(text);
+  try {
+    const url = await ttsSynth(text);
+    $('#voiceStatus').textContent = '🔊 Голос OpenAI (gpt-4o-mini-tts)';
+    return playUrl(url);
+  } catch (e) {
+    $('#voiceStatus').textContent = `⚠️ Голос: ${e.message} — включён робот.`;
+    return browserSpeak(text);
   }
-  return browserSpeak(text);
+}
+
+// режем длинный текст на куски по границам предложений (< maxLen символов)
+function splitChunks(text, maxLen = 3500) {
+  const sentences = text.match(/[^.!?…]*[.!?…]+["»)]*\s*|\S[^.!?…]*$/g) || [text];
+  const chunks = []; let cur = '';
+  for (const s of sentences) {
+    if (cur && (cur + s).length > maxLen) { chunks.push(cur.trim()); cur = ''; }
+    cur += s;
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks;
+}
+
+// длинная озвучка (рассказ): на лету — первый кусок звучит, пока синтезируются следующие
+async function speakLong(text) {
+  stopSpeak();
+  text = forTTS(text);
+  if (!cleanKey($('#openaiKey').value)) return browserSpeak(text);
+  const chunks = splitChunks(text, 3500);
+  log('🔊 рассказ: ' + chunks.length + ' кусок(ов)');
+  const myToken = playToken;
+  let nextP = ttsSynth(chunks[0]).catch(e => ({ err: e }));
+  for (let i = 0; i < chunks.length; i++) {
+    const url = await nextP;
+    if (playToken !== myToken) return;                              // Стоп/новый запрос
+    if (url && url.err) {                                           // сбой синтеза → робот на остаток
+      $('#voiceStatus').textContent = `⚠️ Голос: ${url.err.message} — включён робот.`;
+      return browserSpeak(chunks.slice(i).join(' '));
+    }
+    if (i + 1 < chunks.length) nextP = ttsSynth(chunks[i + 1]).catch(e => ({ err: e }));  // предзагрузка следующего
+    $('#voiceStatus').textContent = `🔊 Голос OpenAI (${i + 1}/${chunks.length})`;
+    await playUrl(url);
+    if (playToken !== myToken) return;
+  }
 }
 
 function browserSpeak(text) {
@@ -510,7 +552,7 @@ function browserSpeak(text) {
   if (v) u.voice = v;
   return new Promise(r => { speakResolve = r; u.onend = settleSpeak; u.onerror = settleSpeak; speechSynthesis.speak(u); });
 }
-$('#speak').onclick = () => { const t = $('#story').textContent; if (t) speak(t); };
+$('#speak').onclick = () => { const t = $('#story').textContent; if (t) speakLong(t); };
 $('#stop').onclick = () => { playToken++; stopSpeak(); stopBg(); };
 speechSynthesis.onvoiceschanged = () => {}; // прогреть список голосов
 </script>
