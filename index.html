@@ -239,13 +239,14 @@ async function recognizeByPhoto(file) {
           { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
           { type: 'text', text: `Что за известное туристическое место, здание или памятник на фото?` +
             (cityHint ? ` Вероятно, это город ${cityHint}.` : '') +
-            ` Ответь ТОЛЬКО названием на русском (можно с городом). Если это не достопримечательность или непонятно — ответь ровно: НЕТ.` }
+            ` Ответь ТОЛЬКО названием на русском (можно с городом), простым текстом без форматирования — без звёздочек, кавычек и markdown. Если это не достопримечательность или непонятно — ответь ровно: НЕТ.` }
         ]}]
       })
     });
     const data = await res.json();
     if (data.error) { $('#story').textContent = 'Ошибка распознавания: ' + data.error.message; stopBg(); return; }
-    const name = data.content.map(c => c.text).join('').trim();
+    let name = data.content.map(c => c.text).join('').trim();
+    name = name.replace(/[*_`#>~]/g, '').replace(/^["'«»\s]+|["'«»\s]+$/g, '').trim(); // убираем markdown/кавычки
     log('📷 распознано: "' + name + '"');
     if (!name || /^нет\b/i.test(name)) {
       $('#story').textContent = 'Не удалось уверенно опознать достопримечательность на фото. Попробуй другой снимок или выбери место вручную.';
