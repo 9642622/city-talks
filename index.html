@@ -443,14 +443,19 @@ async function tellProgressive(title, length) {
   $('#story').textContent = 'Собираю факты…';
   log('▶ рассказ:', '"' + title + '"', '| длина=' + length + ' | источник=' + wiki());
 
+  const narration = makeNarration();
+  // мгновенное интро — звучит сразу под музыку, пока собираются факты и пишется зачин
+  const intros = [`Отлично! Сейчас посмотрю, что известно про ${title}…`,
+                  `${title}. Хороший выбор. Секунду, соберу самое интересное…`,
+                  `Про ${title}? С удовольствием. Дай-ка загляну в историю…`];
+  narration.push(intros[Math.floor(Math.random() * intros.length)]);
+
   let facts = await getFacts(title);
   if (playToken !== myToken) return;
-  if (!facts || facts.length < 150) { $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.'; log('✖ нет фактов'); stopBg(); return; }
+  if (!facts || facts.length < 150) { $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.'; log('✖ нет фактов'); narration.finish(); stopBg(); return; }
   facts = facts.slice(0, 12000);
 
   const base = `Ты — живой городской рассказчик для туриста у объекта «${title}». Язык: ${$('#storyLang').value}. Стиль: ${$('#style').value}.\n${STORY_RULES}\n\nФАКТЫ ОБ ОБЪЕКТЕ (из нескольких Wikipedia на разных языках, помечены [Wikipedia XX] — объедини самое интересное, не повторяйся):\n${facts}`;
-
-  const narration = makeNarration();
 
   // ЗАЧИН — стримим: первые предложения уходят в озвучку через пару секунд; одинаков для любой длины
   $('#story').textContent = 'Рассказываю…';
