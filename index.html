@@ -86,8 +86,13 @@
   <button id="cityBtn">🏙️ Показать известные места города</button>
   <input id="q" placeholder="…или впиши название: напр. Дом Черноголовых">
   <button id="searchBtn" class="sec">🔍 Найти место по названию</button>
-  <label class="muted" style="display:block;margin:10px 0 4px">📷 …или определи место по фото (можно снять камерой):</label>
-  <input id="photoInput" type="file" accept="image/*" capture="environment">
+  <label class="muted" style="display:block;margin:10px 0 4px">📷 Определи место по фото:</label>
+  <div class="row">
+    <button id="camBtn" class="sec">📷 Снять камерой</button>
+    <button id="libBtn" class="sec">🖼 Из галереи</button>
+  </div>
+  <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
+  <input id="libInput" type="file" accept="image/*" style="display:none">
 </div>
 <div id="status" class="muted"></div>
 <div id="places"></div>
@@ -168,7 +173,11 @@ function render(titles, status) {
 }
 
 // ——— распознавание места по фото (Claude Vision) ———
-$('#photoInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recognizeByPhoto(f); });
+$('#camBtn').onclick = () => $('#camInput').click();
+$('#libBtn').onclick = () => $('#libInput').click();
+const onPhoto = e => { const f = e.target.files[0]; if (f) recognizeByPhoto(f); e.target.value = ''; };
+$('#camInput').addEventListener('change', onPhoto);
+$('#libInput').addEventListener('change', onPhoto);
 
 // уменьшаем фото до ~1024px и в jpeg — быстрее и дешевле для API
 function loadImageResized(file, maxDim = 1024) {
