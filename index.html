@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Город говорит — MVP</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font: 17px/1.5 -apple-system, system-ui, sans-serif;
+         background: #0f1115; color: #e8eaed;
+         padding: 16px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  .muted { color: #9aa0a6; font-size: 14px; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 12px 16px;
+           background: #2b6cff; color: #fff; width: 100%; margin: 6px 0; }
+  button.sec { background: #23262d; color: #e8eaed; }
+  select, input { font: inherit; width: 100%; padding: 10px; border-radius: 10px;
+                  background: #23262d; color: #e8eaed; border: 1px solid #34373f; margin: 4px 0; }
+  .row { display: flex; gap: 8px; } .row > * { flex: 1; }
+  .card { background: #1a1d23; border: 1px solid #2a2e36; border-radius: 12px; padding: 12px; margin: 8px 0; }
+  .place { cursor: pointer; }
+  .place b { display: block; }
+  .dist { color: #9aa0a6; font-size: 13px; }
+  #story { white-space: pre-wrap; line-height: 1.65; }
+  details summary { cursor: pointer; color: #9aa0a6; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>🏛️ Город говорит <span class="muted">MVP</span></h1>
+
+<details id="setup">
+  <summary>⚙️ Настройки (ключ Anthropic, один раз)</summary>
+  <div class="card">
+    <input id="key" type="password" placeholder="Anthropic ключ: sk-ant-... (только в этом браузере)">
+    <input id="openaiKey" type="password" placeholder="OpenAI ключ (голос): sk-... | пусто = робот браузера">
+    <select id="ttsVoice" title="Голос">
+      <option value="alloy">Голос: Alloy</option>
+      <option value="ash">Голос: Ash</option>
+      <option value="ballad">Голос: Ballad</option>
+      <option value="coral">Голос: Coral</option>
+      <option value="echo">Голос: Echo</option>
+      <option value="fable">Голос: Fable</option>
+      <option value="nova">Голос: Nova</option>
+      <option value="onyx" selected>Голос: Onyx</option>
+      <option value="sage">Голос: Sage</option>
+      <option value="shimmer">Голос: Shimmer</option>
+      <option value="verse">Голос: Verse</option>
+    </select>
+    <label class="muted" style="display:block;margin-top:6px">🎙️ Настройка голоса (тон, темп, акцент):</label>
+    <textarea id="ttsInstructions" rows="3" style="font:inherit;width:100%;padding:10px;border-radius:10px;background:#23262d;color:#e8eaed;border:1px solid #34373f;margin:4px 0">Говори как носитель русского языка, без иностранного акцента. Тёплый, неспешный голос рассказчика-экскурсовода, естественная интонация и правильные русские ударения.</textarea>
+    <label class="muted" style="display:block;margin-top:6px">🎵 Фоновая музыка (свой файл, по желанию):</label>
+    <input id="musicFile" type="file" accept="audio/*">
+    <div class="row">
+      <select id="storyLang" title="Язык рассказа">
+        <option value="русском">Рассказ: русский</option>
+        <option value="английском">Рассказ: English</option>
+        <option value="латышском">Рассказ: latviešu</option>
+      </select>
+      <select id="wikiLang" title="Язык источников">
+        <option value="ru">Источники: ru</option>
+        <option value="en">Источники: en</option>
+        <option value="lv">Источники: lv</option>
+        <option value="de">Источники: de</option>
+      </select>
+    </div>
+    <div class="row">
+      <select id="length">
+        <option value="30–45 секунд, коротко">Коротко</option>
+        <option value="2–3 минуты" selected>Обычно</option>
+        <option value="6–8 минут, глубоко">Глубоко</option>
+      </select>
+      <select id="style">
+        <option value="живая драматическая история, как у хорошего гида" selected>Живая история</option>
+        <option value="про архитектуру: что смотреть глазами на фасаде">Архитектура</option>
+        <option value="для ребёнка, образно, с вопросами">Детям</option>
+        <option value="без скучных дат, про смысл и людей">Без дат</option>
+      </select>
+    </div>
+  </div>
+</details>
+
+<div class="card">
+  <input id="city" value="Рига" placeholder="Город">
+  <button id="cityBtn">🏙️ Показать известные места города</button>
+  <input id="q" placeholder="…или впиши название: напр. Дом Черноголовых">
+  <button id="searchBtn" class="sec">🔍 Найти место по названию</button>
+  <label class="muted" style="display:block;margin:10px 0 4px">📷 …или определи место по фото (можно снять камерой):</label>
+  <input id="photoInput" type="file" accept="image/*" capture="environment">
+</div>
+<div id="status" class="muted"></div>
+<div id="places"></div>
+
+<div id="player" class="card hidden">
+  <div id="title" style="font-weight:600;margin-bottom:8px"></div>
+  <div class="row">
+    <button id="speak" class="sec">▶︎ Озвучить</button>
+    <button id="stop" class="sec">■ Стоп</button>
+  </div>
+  <div id="voiceStatus" class="muted" style="margin:6px 0"></div>
+  <div id="story"></div>
+  <audio id="bg" loop src="fon.mp3"></audio>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const key = $('#key');
+// привязываем поля к localStorage
+const persist = (el, k) => { const v = localStorage.getItem(k); if (v !== null) el.value = v; el.addEventListener('change', () => localStorage.setItem(k, el.value.trim())); };
+persist(key, 'anthropic_key');
+persist($('#openaiKey'), 'openai_key');
+persist($('#ttsVoice'), 'openai_voice');
+persist($('#ttsInstructions'), 'openai_instructions');
+if (!key.value) $('#setup').open = true;
+
+const wiki = () => $('#wikiLang').value;
+
+// город → (поиск статьи) → координаты → ближайшие места
+$('#cityBtn').onclick = async () => {
+  const city = $('#city').value.trim() || 'Рига';
+  $('#status').textContent = `Ищу центр города «${city}»…`;
+  // сначала находим точное название статьи поиском — устойчиво к языку/написанию
+  const s = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=search` +
+    `&srsearch=${encodeURIComponent(city)}&srlimit=1&format=json&origin=*`).then(r => r.json());
+  const title = s.query?.search?.[0]?.title;
+  if (!title) { $('#status').textContent = `Не нашёл город «${city}». Смени язык источников.`; return; }
+  const c = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&prop=coordinates` +
+    `&titles=${encodeURIComponent(title)}&redirects=1&format=json&origin=*`).then(r => r.json());
+  const co = Object.values(c.query?.pages || {})[0]?.coordinates?.[0];
+  if (!co) { $('#status').textContent = `У статьи «${title}» нет координат. Впиши название точнее.`; return; }
+  await findPlaces(co.lat, co.lon);
+};
+
+async function findPlaces(lat, lon) {
+  $('#status').textContent = 'Ищу известные места…';
+  const r = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=geosearch` +
+    `&gscoord=${lat}|${lon}&gsradius=2000&gslimit=25&format=json&origin=*`).then(r => r.json());
+  const list = r.query?.geosearch || [];
+  render(list.map(p => p.title), `Нашёл ${list.length} мест. Тапни любое:`);
+}
+
+// поиск конкретного объекта по названию
+$('#searchBtn').onclick = async () => {
+  const q = $('#q').value.trim();
+  if (!q) return;
+  $('#status').textContent = `Ищу «${q}»…`;
+  // устойчивость к опечаткам: нечёткий поиск (~) на каждое слово + контекст города
+  const city = $('#city').value.trim();
+  const fuzzy = q.split(/\s+/).map(w => w + '~').join(' ') + (city ? ' ' + city : '');
+  const r = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=search` +
+    `&srsearch=${encodeURIComponent(fuzzy)}&srlimit=10&format=json&origin=*`).then(r => r.json());
+  const titles = (r.query?.search || []).map(s => s.title);
+  if (!titles.length) { $('#status').textContent = 'Ничего не нашёл. Попробуй иначе или смени язык источников.'; return; }
+  render(titles, `Нашёл по запросу «${q}». Тапни нужное:`);
+};
+
+function render(titles, status) {
+  $('#status').textContent = status;
+  $('#places').innerHTML = '';
+  for (const t of titles) {
+    const el = document.createElement('div');
+    el.className = 'card place';
+    el.innerHTML = `<b>${t}</b>`;
+    el.onclick = () => tell(t);
+    $('#places').appendChild(el);
+  }
+}
+
+// ——— распознавание места по фото (Claude Vision) ———
+$('#photoInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recognizeByPhoto(f); });
+
+// уменьшаем фото до ~1024px и в jpeg — быстрее и дешевле для API
+function loadImageResized(file, maxDim = 1024) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = () => reject(new Error('не удалось прочитать изображение'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// имя места → каноничный заголовок статьи Wikipedia (фаззи + контекст города)
+async function wikiFirstTitle(q) {
+  const city = $('#city').value.trim();
+  const fuzzy = q.split(/\s+/).map(w => w + '~').join(' ') + (city ? ' ' + city : '');
+  const r = await fetch(`https://${wiki()}.wikipedia.org/w/api.php?action=query&list=search` +
+    `&srsearch=${encodeURIComponent(fuzzy)}&srlimit=1&format=json&origin=*`).then(r => r.json());
+  return r.query?.search?.[0]?.title || null;
+}
+
+async function recognizeByPhoto(file) {
+  if (!key.value) { alert('Сначала впиши ключ Anthropic в настройках ⚙️'); $('#setup').open = true; return; }
+  ++playToken; stopSpeak();
+  startBg();
+  $('#player').classList.remove('hidden');
+  $('#title').textContent = 'Фото';
+  $('#voiceStatus').textContent = '';
+  $('#story').textContent = 'Смотрю на фото и определяю место…';
+  $('#player').scrollIntoView({ behavior: 'smooth' });
+  try {
+    const base64 = await loadImageResized(file);
+    const cityHint = $('#city').value.trim();
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': key.value.trim(),
+                 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6', max_tokens: 60,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'text', text: `Что за известное туристическое место, здание или памятник на фото?` +
+            (cityHint ? ` Вероятно, это город ${cityHint}.` : '') +
+            ` Ответь ТОЛЬКО названием на русском (можно с городом). Если это не достопримечательность или непонятно — ответь ровно: НЕТ.` }
+        ]}]
+      })
+    });
+    const data = await res.json();
+    if (data.error) { $('#story').textContent = 'Ошибка распознавания: ' + data.error.message; stopBg(); return; }
+    const name = data.content.map(c => c.text).join('').trim();
+    if (!name || /^нет\b/i.test(name)) {
+      $('#story').textContent = 'Не удалось уверенно опознать достопримечательность на фото. Попробуй другой снимок или выбери место вручную.';
+      stopBg(); return;
+    }
+    const title = await wikiFirstTitle(name) || name;
+    tell(title);   // дальше — обычный конвейер: факты → рассказ → голос
+  } catch (e) {
+    $('#story').textContent = 'Сбой распознавания: ' + e.message;
+    stopBg();
+  }
+}
+
+async function tell(title) {
+  stopSpeak();
+  if (!key.value) { alert('Сначала впиши ключ Anthropic в настройках ⚙️'); $('#setup').open = true; return; }
+  const myToken = ++playToken;   // этот запрос; Стоп/новый тап его аннулируют
+  startBg();   // фоновая музыка под весь рассказ
+  $('#player').classList.remove('hidden');
+  $('#title').textContent = title;
+  $('#story').textContent = 'Собираю факты и пишу рассказ…';
+  $('#player').scrollIntoView({ behavior: 'smooth' });
+
+  // мгновенное интро — звучит, пока в фоне качаются факты и пишется рассказ
+  const intros = [
+    `Отлично! Хочешь историю про ${title}? Сейчас посмотрим, что у нас есть…`,
+    `${title}… хороший выбор. Дай-ка соберу, что про это известно…`,
+    `О, ${title}! Минутку — загляну, что тут за история…`
+  ];
+  const introDone = speak(intros[Math.floor(Math.random() * intros.length)]);
+
+  // плеер ожидания: интро → каждые ~10с короткая «заглушка», пока рассказ не готов → сам рассказ
+  let storyText = null, failed = false;
+  (async () => {
+    await introDone;
+    // пауза после интро — воздух, чтобы заглушки не вылетали впритык (музыка играет)
+    for (let t = 0; t < 5 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
+    const fillers = ['Сейчас начнём…', 'Ещё буквально секунду…', 'Почти закончил…',
+                     'Уже совсем близко к финалу…', 'Так, ещё чуть-чуть…', 'Ещё мгновение, и поедем…'];
+    let i = 0;
+    while (storyText === null && !failed && playToken === myToken) {
+      await speak(fillers[i++ % fillers.length]);
+      for (let t = 0; t < 7 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
+    }
+    if (storyText && playToken === myToken) speak(storyText);
+  })();
+
+  // факты из Wikipedia (бесплатно, без ключа)
+  const lang = $('#wikiLang').value;
+  const ex = await fetch(`https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts` +
+    `&explaintext=1&exsectionformat=plain&redirects=1&titles=${encodeURIComponent(title)}&format=json&origin=*`)
+    .then(r => r.json());
+  let facts = Object.values(ex.query?.pages || {})[0]?.extract || '';
+  if (!facts) { $('#story').textContent = 'По этому месту в Wikipedia мало данных — выбери другое.'; failed = true; return; }
+  facts = facts.slice(0, 8000); // ponytail: режем длинные статьи под лимит токенов/цены
+
+  const prompt =
+`Ты — живой городской рассказчик для туриста, который стоит прямо перед объектом «${title}».
+Расскажи историю на ${$('#storyLang').value} языке. Стиль: ${$('#style').value}. Длина: ${$('#length').value}.
+
+ГЛАВНОЕ ТРЕБОВАНИЕ: рассказ должен быть НАСЫЩЕН конкретикой из фактов ниже —
+конкретные годы, имена людей, события, числа, кто построил, что здесь происходило.
+Никаких общих слов вроде «древнее здание с богатой историей». Бери из текста реальные
+детали и вплетай их в живой рассказ. Если в фактах есть дата — назови её. Есть имя — назови.
+
+Правила честности:
+- Не выдумывай того, чего в фактах НЕТ (не сочиняй даты, имена, события от себя).
+- Если источник даёт разные версии — озвучь обе («по одним данным… по другим…»).
+- Легенду честно называй легендой («по одной из легенд…»), но расскажи её — это оживляет.
+- Обращайся на «ты». КАЖДЫЙ рассказ начинай ПО-РАЗНОМУ — не повторяй один и тот же зачин.
+  Чередуй разные крючки: неожиданный факт, вопрос, живую сцену из прошлого, дату с событием, человека.
+  НЕ начинай со слов «посмотри перед собой», «посмотри на…», «перед тобой…».
+- Без markdown, только сплошной текст для озвучки.
+- ВАЖНО для озвучки: в словах с неоднозначным ударением (омографы — стре́лки/стрелки́, за́мок/замо́к,
+  о́рган/орга́н, па́рить/пари́ть, у́же/уже́ и т.п.) ставь знак ударения (комбинирующая острая, U+0301)
+  сразу ПОСЛЕ ударной гласной, чтобы синтезатор произнёс верно по контексту. Обычные однозначные слова НЕ помечай.
+- ВСЕ числа пиши ПРОПИСЬЮ словами, никаких цифр и римских цифр. Синтезатор плохо читает цифры.
+  Примеры: «XIII век» → «тринадцатый век»; «на 40 минут» → «на сорок минут»; «5 башен» → «пять башен».
+- ГОДЫ пиши ПОЛНЫМ числом, а не парами разрядов:
+  «1812 год» → «тысяча восемьсот двенадцатый год» (в тексте падеж по смыслу: «летом тысяча восемьсот двенадцатого года»).
+  НЕЛЬЗЯ разбивать на пары: НЕ «восемнадцать двенадцать», НЕ «восемнадцать двенадцатого».
+  Ещё: «1334» → «тысяча триста тридцать четвёртый»; «1201» → «тысяча двести первый»; «2000» → «двухтысячный».
+  Проверь весь текст: цифр не осталось, и каждый год записан одним полным числительным.
+
+ФАКТЫ ОБ ОБЪЕКТЕ:
+${facts}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': key.value.trim(),
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',   // грамотнее по-русски (числа/падежи/ударения); задержку прикрывают заглушки. Быстрее — 'claude-haiku-4-5-20251001'
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await res.json();
+    if (data.error) { $('#story').textContent = 'Ошибка API: ' + data.error.message; failed = true; return; }
+    const text = data.content.map(c => c.text).join('').replace(/\s*[—–]\s*/g, ', ');
+    $('#story').textContent = text;
+    storyText = text;   // плеер сам включит рассказ после текущей «заглушки»
+  } catch (e) {
+    $('#story').textContent = 'Сбой запроса: ' + e.message;
+    failed = true;
+  }
+}
+
+let audio = null; // текущий ElevenLabs-аудиоэлемент
+let playToken = 0;            // инвалидирует циклы озвучки при Стоп/новом запросе
+let speakResolve = null;      // резолвер текущей озвучки (чтобы await не зависал при остановке)
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function settleSpeak() { if (speakResolve) { const r = speakResolve; speakResolve = null; r(); } }
+
+// фоновая музыка
+const bg = $('#bg');
+$('#musicFile').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) bg.src = URL.createObjectURL(f);
+});
+// генеративный эмбиент-пэд (по умолчанию, без файла) — мягкое трезвучие с медленным фильтром
+let actx = null, pad = null;
+function startPad() {
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+  if (actx.state === 'suspended') actx.resume();
+  if (pad) return;
+  const master = actx.createGain(); master.gain.value = 0.05; master.connect(actx.destination);
+  const filter = actx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 500; filter.connect(master);
+  const lfo = actx.createOscillator(); lfo.frequency.value = 0.04;       // медленное «дыхание»
+  const lfoGain = actx.createGain(); lfoGain.gain.value = 220;
+  lfo.connect(lfoGain); lfoGain.connect(filter.frequency); lfo.start();
+  const oscs = [110, 164.81, 220].map((f, i) => {                        // A2 · E3 · A3
+    const o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = f; o.detune.value = i * 4;
+    const g = actx.createGain(); g.gain.value = 0.5; o.connect(g); g.connect(filter); o.start(); return o;
+  });
+  pad = { oscs, lfo };
+}
+function stopPad() { if (!pad) return; pad.oscs.forEach(o => o.stop()); pad.lfo.stop(); pad = null; }
+
+function startBg() {
+  if (bg.src) { bg.volume = 0.057; bg.currentTime = 0; bg.play().catch(() => {}); }  // свой файл, если выбран
+  else startPad();                                                                   // иначе — генеративный пэд
+}
+function stopBg() { bg.pause(); stopPad(); }
+
+function stopSpeak() { speechSynthesis.cancel(); if (audio) { audio.pause(); audio = null; } settleSpeak(); }
+
+// speak возвращает промис, который резолвится когда озвучка закончилась
+async function speak(text) {
+  stopSpeak();
+  text = text.replace(/\s*[—–]\s*/g, ', ');   // тире озвучиваются странно — заменяем на паузу-запятую
+  // заголовки принимают только ASCII — вычищаем невидимый мусор из ключа/ID
+  const clean = s => s.replace(/[^\x21-\x7E]/g, '');
+  const oaKey = clean($('#openaiKey').value);
+  if (oaKey) {
+    const voice = $('#ttsVoice').value || 'onyx';
+    try {
+      const res = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + oaKey, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini-tts',
+          voice,
+          input: text,
+          response_format: 'mp3',
+          instructions: $('#ttsInstructions').value.trim() || 'Читай по-русски, без иностранного акцента, тёплым неспешным голосом экскурсовода.'
+        })
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        $('#voiceStatus').textContent = `⚠️ OpenAI TTS ошибка ${res.status}: ${body.slice(0,300)} — включён робот.`;
+        return browserSpeak(text);
+      }
+      $('#voiceStatus').textContent = '🔊 Голос OpenAI (gpt-4o-mini-tts)';
+      audio = new Audio(URL.createObjectURL(await res.blob()));
+      const done = new Promise(r => { speakResolve = r; audio.onended = settleSpeak; audio.onerror = settleSpeak; });
+      audio.play();
+      return done;
+    } catch (e) {
+      $('#voiceStatus').textContent = `⚠️ Голос не загрузился: ${e.message} (возможно CORS/сеть) — включён робот.`;
+      return browserSpeak(text);
+    }
+  }
+  return browserSpeak(text);
+}
+
+function browserSpeak(text) {
+  const map = { 'русском': 'ru', 'английском': 'en', 'латышском': 'lv' };
+  const code = map[$('#storyLang').value] || 'ru';
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = code;
+  const v = speechSynthesis.getVoices().find(v => v.lang.startsWith(code));
+  if (v) u.voice = v;
+  return new Promise(r => { speakResolve = r; u.onend = settleSpeak; u.onerror = settleSpeak; speechSynthesis.speak(u); });
+}
+$('#speak').onclick = () => { const t = $('#story').textContent; if (t) speak(t); };
+$('#stop').onclick = () => { playToken++; stopSpeak(); stopBg(); };
+speechSynthesis.onvoiceschanged = () => {}; // прогреть список голосов
+</script>
+</body>
+</html>
