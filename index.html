@@ -298,18 +298,23 @@ async function tell(title) {
 
   // плеер ожидания: интро → каждые ~10с короткая «заглушка», пока рассказ не готов → сам рассказ
   let storyText = null, failed = false;
+  log('интро запущено');
   (async () => {
     await introDone;
+    log('интро отзвучало → пауза (рассказ готов? ' + (storyText !== null) + ')');
     // пауза после интро — воздух, чтобы заглушки не вылетали впритык (музыка играет)
     for (let t = 0; t < 5 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
     const fillers = ['Сейчас начнём…', 'Ещё буквально секунду…', 'Почти закончил…',
                      'Уже совсем близко к финалу…', 'Так, ещё чуть-чуть…', 'Ещё мгновение, и поедем…'];
     let i = 0;
     while (storyText === null && !failed && playToken === myToken) {
-      await speak(fillers[i++ % fillers.length]);
+      const ph = fillers[i++ % fillers.length];
+      log('🗣 заглушка: ' + ph);
+      await speak(ph);
       for (let t = 0; t < 7 && storyText === null && !failed && playToken === myToken; t++) await sleep(1000);
     }
-    if (storyText && playToken === myToken) speak(storyText);
+    log('плеер завершил ожидание (готов=' + (storyText !== null) + ', failed=' + failed + ')');
+    if (storyText && playToken === myToken) { log('▶ включаю рассказ'); speak(storyText); }
   })();
 
   // факты из Wikipedia (бесплатно, без ключа)
