@@ -539,6 +539,8 @@ async function ttsSynth(text) {
       voice: $('#ttsVoice').value || 'onyx',
       input: text,
       response_format: 'mp3',
+      speed: 1.1,                     // на 10% быстрее диктора
+
       instructions: $('#ttsInstructions').value.trim() || 'Читай по-русски, без иностранного акцента, тёплым неспешным голосом экскурсовода.'
     })
   });
